@@ -3,6 +3,7 @@ import { Canvas, useFrame, useLoader, useThree, type ThreeEvent } from "@react-t
 import { OrbitControls } from "@react-three/drei";
 import {
   CoefficientCombineRule,
+  ConvexHullCollider,
   CuboidCollider,
   Physics,
   RigidBody,
@@ -14,6 +15,7 @@ import { bodies, bodyIds, emitPile, pileBus } from "./bus";
 import { liveLimit, onPhone } from "./device";
 import { EmojiTextureLoader } from "./emoji-texture";
 import { loadEmojiLibrary, type EmojiAsset } from "./library";
+import { buildEmojiBody } from "./silhouette";
 
 type Drop = {
   key: string;
@@ -226,23 +228,24 @@ function EmojiCard({
   const normal = useRef(new THREE.Vector3());
   const size = asset.size;
 
+  const bodyShape = useMemo(() => {
+    const image = map.image as HTMLCanvasElement | undefined;
+    const ctx = image && typeof image.getContext === "function" ? image.getContext("2d", { willReadFrequently: true }) : null;
+    const pixels = ctx && image ? ctx.getImageData(0, 0, image.width, image.height) : null;
+    return pixels ? buildEmojiBody(pixels, size, THICK) : null;
+  }, [map, size]);
+
   const materials = useMemo(() => {
-    const backMap = map.clone();
-    backMap.wrapS = THREE.RepeatWrapping;
-    backMap.repeat.x = -1;
-    backMap.offset.x = 1;
-    backMap.needsUpdate = true;
-    const face = {
+    const face = new THREE.MeshStandardMaterial({
+      map,
       roughness: 0.46,
       metalness: 0.02,
       transparent: true,
-      alphaTest: 0.18,
+      alphaTest: 0.12,
       depthWrite: true,
-    };
-    const edge = new THREE.MeshStandardMaterial({ color: "#efe4d4", roughness: 0.72, metalness: 0 });
-    const front = new THREE.MeshStandardMaterial({ ...face, map });
-    const back = new THREE.MeshStandardMaterial({ ...face, map: backMap });
-    return [edge, edge, edge, edge, front, back];
+    });
+    const edge = new THREE.MeshStandardMaterial({ color: "#efe4d4", roughness: 0.62, metalness: 0 });
+    return [face, edge];
   }, [map]);
 
   useEffect(() => {
@@ -356,17 +359,19 @@ function EmojiCard({
       <mesh
         castShadow={!onPhone()}
         receiveShadow={!onPhone()}
+        geometry={bodyShape?.geometry}
         material={materials}
         onPointerDown={onDown}
-      >
-        <boxGeometry args={[size, size, THICK]} />
-      </mesh>
-      <CuboidCollider
-        args={[size / 2, size / 2, THICK / 2]}
-        mass={0.28 + size * 0.45}
-        friction={0.92}
-        restitution={0.08}
       />
+      {bodyShape?.hulls.map((points, i) => (
+        <ConvexHullCollider
+          key={i}
+          args={[points]}
+          mass={i === 0 ? 0.28 + size * 0.45 : 0}
+          friction={0.92}
+          restitution={0.08}
+        />
+      ))}
     </RigidBody>
   );
 }

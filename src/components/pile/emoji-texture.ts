@@ -15,7 +15,7 @@ export class EmojiTextureLoader extends THREE.Loader<THREE.CanvasTexture> {
       const canvas = document.createElement("canvas");
       canvas.width = SIZE;
       canvas.height = SIZE;
-      const ctx = canvas.getContext("2d");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx) {
         onError?.(new Error("canvas"));
         return;
