@@ -10,13 +10,8 @@ export type EmojiAsset = {
   size: number;
 };
 
-function hashSize(id: string) {
-  let h = 2166136261;
-  for (let i = 0; i < id.length; i++) {
-    h ^= id.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return 0.46 + ((h >>> 0) / 4294967295) * 0.5;
+function toAsset(id: string): EmojiAsset {
+  return { id, name: id, url: emojiUrl(id), size: 1 };
 }
 
 export function emojiUrl(id: string) {
@@ -24,10 +19,6 @@ export function emojiUrl(id: string) {
   if (typeof window === "undefined") return path;
   const prefix = previewPathPrefix(window.location.hostname, window.location.pathname);
   return prefix ? `${prefix}${path}` : path;
-}
-
-function toAsset(id: string): EmojiAsset {
-  return { id, name: id, url: emojiUrl(id), size: hashSize(id) };
 }
 
 // Unicode's 2019 median-frequency ranking, matched to Xero artwork. 500 only.

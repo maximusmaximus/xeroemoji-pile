@@ -15,7 +15,7 @@ import { bodies, bodyIds, emitPile, pileBus } from "./bus";
 import { liveLimit, onPhone } from "./device";
 import { EmojiTextureLoader } from "./emoji-texture";
 import { loadEmojiLibrary, type EmojiAsset } from "./library";
-import { buildEmojiBody } from "./silhouette";
+import { buildEmojiBody, emojiKeyColor } from "./silhouette";
 
 type Drop = {
   key: string;
@@ -25,7 +25,14 @@ type Drop = {
 };
 
 const AREA = 2.85;
-const THICK = 0.08;
+
+function dropSize() {
+  return 0.3 + Math.random() * 1.2;
+}
+
+function edgeThickness(size: number) {
+  return 0.05 + size * 0.055;
+}
 
 function Lights({ lit }: { lit: boolean }) {
   return (
@@ -227,13 +234,15 @@ function EmojiCard({
   const velocity = useRef(new THREE.Vector3());
   const normal = useRef(new THREE.Vector3());
   const size = asset.size;
+  const thick = edgeThickness(size);
 
   const bodyShape = useMemo(() => {
     const image = map.image as HTMLCanvasElement | undefined;
     const ctx = image && typeof image.getContext === "function" ? image.getContext("2d", { willReadFrequently: true }) : null;
     const pixels = ctx && image ? ctx.getImageData(0, 0, image.width, image.height) : null;
-    return pixels ? buildEmojiBody(pixels, size, THICK) : null;
-  }, [map, size]);
+    if (!pixels) return null;
+    return { ...buildEmojiBody(pixels, size, thick), color: emojiKeyColor(pixels) };
+  }, [map, size, thick]);
 
   const materials = useMemo(() => {
     const face = new THREE.MeshStandardMaterial({
@@ -244,9 +253,13 @@ function EmojiCard({
       alphaTest: 0.12,
       depthWrite: true,
     });
-    const edge = new THREE.MeshStandardMaterial({ color: "#efe4d4", roughness: 0.62, metalness: 0 });
+    const edge = new THREE.MeshStandardMaterial({
+      color: bodyShape?.color ?? "#efe4d4",
+      roughness: 0.48,
+      metalness: 0.02,
+    });
     return [face, edge];
-  }, [map]);
+  }, [map, bodyShape?.color]);
 
   useEffect(() => {
     const current = body.current;
@@ -367,7 +380,7 @@ function EmojiCard({
         <ConvexHullCollider
           key={i}
           args={[points]}
-          mass={i === 0 ? 0.28 + size * 0.45 : 0}
+          mass={i === 0 ? 0.22 + size * size * 0.62 : 0}
           friction={0.92}
           restitution={0.08}
         />
@@ -491,17 +504,19 @@ function Spawner() {
       const next: Drop[] = [];
       while (waveLeft.current > 0 && pending.length > 0 && now >= nextDrop.current) {
         const asset = pending.pop()!;
+        const size = dropSize();
         waveLeft.current -= 1;
         nextDrop.current += 80;
         rememberIds([asset.id]);
         const angle = Math.random() * Math.PI * 2;
-        const radius = Math.sqrt(Math.random()) * (AREA - 1.05);
+        const reach = Math.max(0.45, AREA - 0.7 - size * 0.45);
+        const radius = Math.sqrt(Math.random()) * reach;
         next.push({
           key: `${asset.id}-${live.current + next.length}`,
-          asset,
+          asset: { ...asset, size },
           position: [
             Math.cos(angle) * radius,
-            2.5 + Math.random() * 1.6,
+            2.1 + size + Math.random() * 1.5,
             Math.sin(angle) * radius,
           ],
           rotation: [Math.random() * Math.PI, Math.random() * Math.PI * 2, Math.random() * 0.6],

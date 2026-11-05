@@ -237,6 +237,67 @@ function fallbackBody(size: number, thick: number): EmojiBody {
   };
 }
 
+function hsv(r: number, g: number, b: number) {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const d = max - min;
+  let h = 0;
+  if (d > 1e-4) {
+    if (max === rn) h = ((gn - bn) / d) % 6;
+    else if (max === gn) h = (bn - rn) / d + 2;
+    else h = (rn - gn) / d + 4;
+    if (h < 0) h += 6;
+  }
+  return { h: h / 6, s: max === 0 ? 0 : d / max, v: max };
+}
+
+function hexAvg(sum: { r: number; g: number; b: number; n: number }) {
+  const hex = (v: number) =>
+    Math.max(0, Math.min(255, Math.round(v / sum.n)))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${hex(sum.r)}${hex(sum.g)}${hex(sum.b)}`;
+}
+
+export function emojiKeyColor(image: ImageData) {
+  const { data, width, height } = image;
+  const hues = 18;
+  const bins = Array.from({ length: hues }, () => ({ r: 0, g: 0, b: 0, n: 0 }));
+  const gray = { r: 0, g: 0, b: 0, n: 0 };
+  const step = width > 80 ? 2 : 1;
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const i = (y * width + x) * 4;
+      if ((data[i + 3] ?? 0) < 160) continue;
+      const r = data[i] ?? 0;
+      const g = data[i + 1] ?? 0;
+      const b = data[i + 2] ?? 0;
+      const { h, s, v } = hsv(r, g, b);
+      if (s < 0.22 || v < 0.14) {
+        gray.r += r;
+        gray.g += g;
+        gray.b += b;
+        gray.n += 1;
+        continue;
+      }
+      const weight = 0.3 + v * v;
+      const bin = bins[Math.min(hues - 1, Math.floor(h * hues))]!;
+      bin.r += r * weight;
+      bin.g += g * weight;
+      bin.b += b * weight;
+      bin.n += weight;
+    }
+  }
+  let best = bins[0]!;
+  for (const bin of bins) if (bin.n > best.n) best = bin;
+  if (best.n >= gray.n && best.n > 0) return hexAvg(best);
+  if (gray.n > 0) return hexAvg(gray);
+  return "#efe4d4";
+}
+
 export function buildEmojiBody(image: ImageData, size: number, thick: number): EmojiBody {
   const contours = traceContours(buildMask(image))
     .map(relax)
