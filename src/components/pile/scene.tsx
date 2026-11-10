@@ -11,11 +11,18 @@ import {
   type RapierRigidBody,
 } from "@react-three/rapier";
 import * as THREE from "three";
-import { bodies, bodyIds, emitPile, pileBus } from "./bus";
+import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+import { scaleFor, shuffleVisit, type Visit, BASE_WAVE } from "@/data/visit";
+import { bodies, bodyIds, emitPile, pileBus, setHold } from "./bus";
 import { liveLimit, onPhone } from "./device";
 import { EmojiTextureLoader } from "./emoji-texture";
 import { loadEmojiLibrary, type EmojiAsset } from "./library";
 import { buildEmojiBody, emojiKeyColor } from "./silhouette";
+
+// Landing disk radius was 2.85. "4× larger area" is 2× width and 2× depth.
+// That matches SAND at sandpile.grok.me (radius 5.6).
+const AREA = 2.85 * 2;
+const FALL_RADIUS = (2.85 - 0.7) * 2;
 
 type Drop = {
   key: string;
@@ -24,14 +31,23 @@ type Drop = {
   rotation: [number, number, number];
 };
 
-const AREA = 2.85;
+type Pixel = { r: number; g: number; b: number; u: number; v: number };
 
-function dropSize() {
-  return 0.3 + Math.random() * 1.2;
-}
+type Shard = {
+  key: string;
+  position: [number, number, number];
+  size: number;
+  color: string;
+  velocity: [number, number, number];
+  ang: [number, number, number];
+};
 
 function edgeThickness(size: number) {
   return 0.05 + size * 0.055;
+}
+
+function hexColor(r: number, g: number, b: number) {
+  return `#${[r, g, b].map((c) => Math.round(c).toString(16).padStart(2, "0")).join("")}`;
 }
 
 function Lights({ lit }: { lit: boolean }) {
@@ -39,25 +55,8 @@ function Lights({ lit }: { lit: boolean }) {
     <>
       <hemisphereLight args={lit ? ["#fff6e8", "#cbbba6", 1.2] : ["#3a342c", "#090807", 0.16]} />
       <ambientLight intensity={lit ? 0.78 : 0.04} />
-      <directionalLight
-        position={[7, 12, 5]}
-        intensity={lit ? 2.8 : 0.38}
-        color={lit ? "#fffaf2" : "#ffe0b0"}
-        castShadow={!onPhone()}
-        shadow-mapSize={[1024, 1024]}
-        shadow-camera-near={2}
-        shadow-camera-far={28}
-        shadow-camera-left={-7}
-        shadow-camera-right={7}
-        shadow-camera-top={7}
-        shadow-camera-bottom={-7}
-        shadow-bias={-0.00035}
-      />
-      <directionalLight
-        position={[-6, 6, -4]}
-        intensity={lit ? 1.15 : 0.08}
-        color={lit ? "#ffe7c2" : "#8a7a66"}
-      />
+      <directionalLight position={[7, 12, 5]} intensity={lit ? 2.8 : 0.38} color={lit ? "#fffaf2" : "#ffe0b0"} />
+      <directionalLight position={[-6, 6, -4]} intensity={lit ? 1.15 : 0.08} color={lit ? "#ffe7c2" : "#8a7a66"} />
     </>
   );
 }
@@ -67,7 +66,7 @@ function Backdrop({ lit }: { lit: boolean }) {
   useEffect(() => {
     const color = new THREE.Color(lit ? "#f3ece3" : "#0e0d0b");
     scene.background = color;
-    scene.fog = new THREE.Fog(color, 13, 32);
+    scene.fog = null;
   }, [lit, scene]);
   return null;
 }
@@ -104,8 +103,8 @@ function discGeometry(radius: number, rings: number, segs: number) {
 }
 
 function Membrane({ lit }: { lit: boolean }) {
-  const rings = 16;
-  const segs = 32;
+  const rings = 24;
+  const segs = 48;
   const geometry = useMemo(() => discGeometry(AREA, rings, segs), []);
   const rest = useMemo(() => Float32Array.from(geometry.attributes.position.array), [geometry]);
   const velocity = useMemo(() => new Float32Array(geometry.attributes.position.count), [geometry]);
@@ -161,28 +160,31 @@ function Membrane({ lit }: { lit: boolean }) {
 }
 
 function Floor({ lit }: { lit: boolean }) {
+  const wallR = AREA + 0.7;
+  const posts = Math.ceil((Math.PI * 2 * wallR) / 0.95);
+  const halfTang = (Math.PI * wallR) / posts + 0.16;
   return (
     <group>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
-        <circleGeometry args={[22, 64]} />
+        <circleGeometry args={[AREA + 26, 80]} />
         <meshStandardMaterial color={lit ? "#e6ded2" : "#12100c"} roughness={1} metalness={0} />
       </mesh>
       <Membrane lit={lit} />
       <RigidBody type="fixed" colliders={false} friction={0.55} restitution={0.72}>
         <CuboidCollider
-          args={[24, 4, 24]}
+          args={[AREA + 22, 4, AREA + 22]}
           position={[0, -4, 0]}
           friction={0.55}
           restitution={0.72}
           restitutionCombineRule={CoefficientCombineRule.Max}
         />
-        {Array.from({ length: 18 }, (_, i) => {
-          const a = (i / 18) * Math.PI * 2;
+        {Array.from({ length: posts }, (_, i) => {
+          const a = (i / posts) * Math.PI * 2;
           return (
             <CuboidCollider
               key={i}
-              args={[0.16, 1.7, 0.58]}
-              position={[Math.sin(a) * (AREA + 0.2), 1.6, Math.cos(a) * (AREA + 0.2)]}
+              args={[0.7, 10, halfTang]}
+              position={[Math.sin(a) * wallR, 10, Math.cos(a) * wallR]}
               rotation={[0, a - Math.PI / 2, 0]}
               friction={0.7}
               restitution={0.18}
@@ -205,27 +207,116 @@ class QuietBoundary extends Component<{ children: ReactNode }, { failed: boolean
   }
 }
 
-type OrbitLike = {
-  enabled: boolean;
-  target: THREE.Vector3;
-  update: () => void;
-};
+function readEmojiPixels(image: ImageData): Pixel[] {
+  const { width, height, data } = image;
+  const step = Math.max(1, Math.floor(Math.min(width, height) / 16));
+  const pixels: Pixel[] = [];
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const i = (y * width + x) * 4;
+      if ((data[i + 3] ?? 0) < 40) continue;
+      pixels.push({
+        r: data[i] ?? 0,
+        g: data[i + 1] ?? 0,
+        b: data[i + 2] ?? 0,
+        u: (x + 0.5) / width,
+        v: (y + 0.5) / height,
+      });
+    }
+  }
+  return pixels;
+}
+
+function blastAround(origin: THREE.Vector3, power: number, radius: number, skip: RapierRigidBody | null) {
+  for (const body of bodies) {
+    if (body === skip) continue;
+    const t = body.translation();
+    const dx = t.x - origin.x;
+    const dy = t.y - origin.y;
+    const dz = t.z - origin.z;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > radius || dist < 1e-3) continue;
+    const mass = body.mass();
+    if (!Number.isFinite(mass) || mass <= 0) continue;
+    const fall = (1 - dist / radius) ** 2;
+    const mag = power * fall * Math.min(mass, 9);
+    const nx = dx / dist;
+    const ny = dy / dist;
+    const nz = dz / dist;
+    body.wakeUp();
+    body.applyImpulse({ x: nx * mag, y: (ny * 0.55 + 0.55) * mag, z: nz * mag }, true);
+    body.applyTorqueImpulse(
+      {
+        x: (Math.random() - 0.5) * mag * 0.4,
+        y: (Math.random() - 0.5) * mag * 0.22,
+        z: (Math.random() - 0.5) * mag * 0.4,
+      },
+      true,
+    );
+  }
+}
+
+function PixelShard({ shard }: { shard: Shard }) {
+  const ref = useRef<RapierRigidBody>(null);
+  useEffect(() => {
+    const current = ref.current;
+    if (!current) return;
+    bodies.add(current);
+    current.setLinvel({ x: shard.velocity[0], y: shard.velocity[1], z: shard.velocity[2] }, true);
+    current.setAngvel({ x: shard.ang[0], y: shard.ang[1], z: shard.ang[2] }, true);
+    return () => {
+      bodies.delete(current);
+      if (pileBus.held === current) pileBus.held = null;
+    };
+  }, [shard.ang, shard.velocity]);
+  return (
+    <RigidBody
+      ref={ref}
+      position={shard.position}
+      colliders="cuboid"
+      mass={Math.max(0.08, shard.size * shard.size * 4.5)}
+      linearDamping={0.06}
+      angularDamping={0.18}
+      friction={0.86}
+      restitution={0.04}
+      ccd
+      canSleep
+    >
+      <mesh>
+        <boxGeometry args={[shard.size, shard.size, shard.size]} />
+        <meshStandardMaterial color={shard.color} roughness={0.72} metalness={0} />
+      </mesh>
+    </RigidBody>
+  );
+}
 
 function EmojiCard({
   asset,
   position,
   rotation,
+  onBurst,
+  onGone,
 }: {
   asset: EmojiAsset;
   position: [number, number, number];
   rotation: [number, number, number];
+  onBurst: (shards: Shard[]) => void;
+  onGone: () => void;
 }) {
   const map = useLoader(EmojiTextureLoader, asset.url);
   const body = useRef<RapierRigidBody>(null);
+  const group = useRef<THREE.Group>(null);
   const camera = useThree((s) => s.camera);
   const gl = useThree((s) => s.gl);
-  const controls = useThree((s) => s.controls) as OrbitLike | null;
+  const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
   const held = useRef(false);
+  const mode = useRef<"none" | "charge" | "drag">("none");
+  const timer = useRef(0);
+  const pointerStart = useRef({ x: 0, y: 0 });
+  const burstRef = useRef(onBurst);
+  const goneRef = useRef(onGone);
+  burstRef.current = onBurst;
+  goneRef.current = onGone;
   const ndc = useRef(new THREE.Vector2());
   const raycaster = useRef(new THREE.Raycaster());
   const plane = useRef(new THREE.Plane());
@@ -241,7 +332,7 @@ function EmojiCard({
     const ctx = image && typeof image.getContext === "function" ? image.getContext("2d", { willReadFrequently: true }) : null;
     const pixels = ctx && image ? ctx.getImageData(0, 0, image.width, image.height) : null;
     if (!pixels) return null;
-    return { ...buildEmojiBody(pixels, size, thick), color: emojiKeyColor(pixels) };
+    return { ...buildEmojiBody(pixels, size, thick), color: emojiKeyColor(pixels), pixels };
   }, [map, size, thick]);
 
   const materials = useMemo(() => {
@@ -298,8 +389,112 @@ function EmojiCard({
     current.setLinvel({ x: v.x * 0.7, y: v.y * 0.7, z: v.z * 0.7 }, true);
   };
 
+  const clearHold = () => {
+    if (timer.current) window.clearTimeout(timer.current);
+    timer.current = 0;
+  };
+
+  const explode = () => {
+    const current = body.current;
+    if (!current || mode.current === "none") return;
+    mode.current = "none";
+    held.current = false;
+    clearHold();
+    if (pileBus.hold?.id === asset.id) setHold(null);
+    pileBus.dragging = false;
+    if (pileBus.held === current) pileBus.held = null;
+    if (controls) controls.enabled = true;
+    const t = current.translation();
+    const r = current.rotation();
+    const v = current.linvel();
+    const quat = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+    const origin = new THREE.Vector3(t.x, t.y, t.z);
+    const sizeX = size;
+    const sizeY = size;
+    const sizeZ = Math.max(0.12, thick * 2);
+    const block = Math.max(0.045, Math.min(sizeX, sizeY) / 15);
+    let pixels = bodyShape?.pixels ? readEmojiPixels(bodyShape.pixels) : [];
+    if (pixels.length < 4) {
+      const color = bodyShape?.color ?? "#efe4d4";
+      const n = Number.parseInt(color.slice(1), 16);
+      const swatch = { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+      pixels = Array.from({ length: 16 }, (_, i) => ({
+        ...swatch,
+        u: ((i % 4) + 0.5) / 4,
+        v: (Math.floor(i / 4) + 0.5) / 4,
+      }));
+    }
+    const cap = Math.round(Math.min(42, 16 + size * 8));
+    if (pixels.length > cap) {
+      const stride = pixels.length / cap;
+      const picked: Pixel[] = [];
+      for (let i = 0; i < cap; i++) picked.push(pixels[Math.floor(i * stride)]!);
+      pixels = picked;
+    }
+    const layers = size > 1.15 ? 3 : 2;
+    const shards: Shard[] = [];
+    const local = new THREE.Vector3();
+    const world = new THREE.Vector3();
+    outer: for (let index = 0; index < pixels.length; index++) {
+      const pixel = pixels[index]!;
+      for (let layer = 0; layer < layers; layer++) {
+        if (shards.length >= 48) break outer;
+        const z01 = layer / (layers - 1);
+        local.set((pixel.u - 0.5) * sizeX, (0.5 - pixel.v) * sizeY, (z01 - 0.5) * sizeZ);
+        world.copy(local).applyQuaternion(quat).add(origin);
+        const dir = local.clone();
+        if (dir.lengthSq() < 1e-4) dir.set(Math.random() - 0.5, 0.2, Math.random() - 0.5);
+        dir.normalize();
+        const speed = 4.2 + size * 2.4 + Math.random() * 2.4;
+        shards.push({
+          key: `${asset.id}-${index}-${layer}`,
+          position: [world.x, world.y, world.z],
+          size: block,
+          color: hexColor(pixel.r, pixel.g, pixel.b),
+          velocity: [
+            dir.x * speed + v.x * 0.35 + (Math.random() - 0.5) * 1.2,
+            Math.abs(dir.y) * speed * 0.55 + 2.4 + Math.random() * 2.2 + Math.min(0, v.y) * 0.25,
+            dir.z * speed + v.z * 0.35 + (Math.random() - 0.5) * 1.2,
+          ],
+          ang: [(Math.random() - 0.5) * 14, (Math.random() - 0.5) * 10, (Math.random() - 0.5) * 14],
+        });
+      }
+    }
+    blastAround(origin, 8 + size * 7, 1.15 + size * 1.9, current);
+    burstRef.current(shards);
+    goneRef.current();
+  };
+
   useEffect(() => {
     const move = (event: PointerEvent) => {
+      if (mode.current === "charge") {
+        const dx = event.clientX - pointerStart.current.x;
+        const dy = event.clientY - pointerStart.current.y;
+        if (dx * dx + dy * dy > 196) {
+          clearHold();
+          mode.current = "drag";
+          held.current = true;
+          pileBus.held = body.current;
+          const current = body.current;
+          if (current) {
+            const rect = gl.domElement.getBoundingClientRect();
+            ndc.current.set(
+              ((event.clientX - rect.left) / rect.width) * 2 - 1,
+              -((event.clientY - rect.top) / rect.height) * 2 + 1,
+            );
+            raycaster.current.setFromCamera(ndc.current, camera);
+            camera.getWorldDirection(normal.current);
+            const p = current.translation();
+            const point =
+              raycaster.current.ray.intersectPlane(plane.current, hit.current) ?? new THREE.Vector3(p.x, p.y, p.z);
+            plane.current.setFromNormalAndCoplanarPoint(normal.current, point);
+            grabOffset.current.set(p.x - point.x, p.y - point.y, p.z - point.z);
+            velocity.current.set(0, 0, 0);
+            current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+            current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+          }
+        }
+      }
       if (!held.current || pileBus.held !== body.current) return;
       const rect = gl.domElement.getBoundingClientRect();
       ndc.current.set(
@@ -307,18 +502,33 @@ function EmojiCard({
         -((event.clientY - rect.top) / rect.height) * 2 + 1,
       );
     };
-    const up = () => release();
+    const up = () => {
+      clearHold();
+      if (mode.current === "drag") release();
+      else {
+        pileBus.dragging = false;
+        if (controls) controls.enabled = true;
+      }
+      mode.current = "none";
+      if (pileBus.hold?.id === asset.id) setHold(null);
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
     return () => {
+      clearHold();
+      if (pileBus.hold?.id === asset.id) setHold(null);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
     };
-  }, [gl, controls]);
+  }, [gl, controls, camera, asset.id]);
 
   useFrame((_, delta) => {
+    if (group.current) {
+      const pulse = mode.current === "charge" ? 1 + Math.sin(performance.now() * 0.028) * 0.045 : 1;
+      group.current.scale.setScalar(pulse);
+    }
     const current = body.current;
     if (!held.current || !current || pileBus.held !== current) return;
     raycaster.current.setFromCamera(ndc.current, camera);
@@ -337,12 +547,12 @@ function EmojiCard({
   const onDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
     const current = body.current;
-    if (!current) return;
-    held.current = true;
+    if (!current || mode.current !== "none") return;
+    mode.current = "charge";
     pileBus.dragging = true;
     pileBus.heat = Math.min(1, pileBus.heat + 0.16);
-    pileBus.held = current;
     if (controls) controls.enabled = false;
+    pointerStart.current = { x: e.nativeEvent.clientX, y: e.nativeEvent.clientY };
     const rect = gl.domElement.getBoundingClientRect();
     ndc.current.set(
       ((e.nativeEvent.clientX - rect.left) / rect.width) * 2 - 1,
@@ -350,12 +560,13 @@ function EmojiCard({
     );
     camera.getWorldDirection(normal.current);
     plane.current.setFromNormalAndCoplanarPoint(normal.current, e.point);
-    const p = current.translation();
-    grabOffset.current.set(p.x - e.point.x, p.y - e.point.y, p.z - e.point.z);
-    velocity.current.set(0, 0, 0);
     current.wakeUp();
-    current.setLinvel({ x: 0, y: 0, z: 0 }, true);
-    current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    setHold({ id: asset.id, label: asset.name, color: bodyShape?.color ?? "#efe4d4" });
+    clearHold();
+    timer.current = window.setTimeout(() => {
+      timer.current = 0;
+      if (mode.current === "charge") explode();
+    }, 480);
   };
 
   return (
@@ -369,13 +580,9 @@ function EmojiCard({
       ccd
       canSleep
     >
-      <mesh
-        castShadow={!onPhone()}
-        receiveShadow={!onPhone()}
-        geometry={bodyShape?.geometry}
-        material={materials}
-        onPointerDown={onDown}
-      />
+      <group ref={group} onPointerDown={onDown}>
+        <mesh geometry={bodyShape?.geometry} material={materials} />
+      </group>
       {bodyShape?.hulls.map((points, i) => (
         <ConvexHullCollider
           key={i}
@@ -409,23 +616,13 @@ function writeLastIds(ids: string[]) {
   }
 }
 
-function shuffleAssets(assets: EmojiAsset[]) {
-  for (let i = assets.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const swap = assets[i]!;
-    assets[i] = assets[j]!;
-    assets[j] = swap;
-  }
-  return assets;
-}
-
 function rememberIds(ids: string[]) {
   const last = readLastIds();
   for (const id of ids) last.add(id);
   writeLastIds([...last]);
 }
 
-function freshQueue(library: EmojiAsset[]) {
+function freshQueue(library: EmojiAsset[], seed: number) {
   const unique: EmojiAsset[] = [];
   const seenIds = new Set<string>();
   for (const asset of library) {
@@ -442,31 +639,33 @@ function freshQueue(library: EmojiAsset[]) {
     pool = unique.filter((asset) => !block.has(asset.id));
     writeLastIds(recent);
   }
-  return shuffleAssets(pool);
+  return shuffleVisit(pool, seed);
 }
 
-function Spawner() {
+function Spawner({ visit }: { visit: Visit }) {
   const [drops, setDrops] = useState<Drop[]>([]);
+  const [shards, setShards] = useState<Shard[]>([]);
   const queue = useRef<EmojiAsset[] | null>(null);
   const ready = useRef(false);
-  const batch = useRef(12);
-  const limit = useRef(240);
+  const batch = useRef(BASE_WAVE * 2);
+  const limit = useRef(280);
   const live = useRef(0);
   const waveLeft = useRef(0);
   const falling = useRef(false);
   const landAt = useRef(0);
   const moreSeen = useRef(0);
   const nextDrop = useRef(0);
+  const perTick = useRef(2);
 
   const beginWave = (remaining: number) => {
-    const count = Math.min(remaining, batch.current, limit.current - live.current);
+    const count = Math.min(remaining, batch.current, Math.max(0, limit.current - live.current));
     if (count <= 0) {
       falling.current = false;
       pileBus.moreReady = false;
       emitPile();
       return;
     }
-    waveLeft.current = count;
+    waveLeft.current += count;
     falling.current = true;
     nextDrop.current = performance.now();
     landAt.current = Number.POSITIVE_INFINITY;
@@ -480,53 +679,61 @@ function Spawner() {
       const library = await loadEmojiLibrary();
       if (stop) return;
       limit.current = liveLimit();
-      const pending = freshQueue(library);
+      const pending = freshQueue(library, visit.seed);
       queue.current = pending;
+      batch.current = Math.round(BASE_WAVE * visit.mult);
+      perTick.current = Math.max(1, Math.round(batch.current / 150));
       live.current = 0;
       ready.current = true;
-      batch.current = Math.max(12, Math.round(library.length * 0.01));
+      setDrops([]);
       beginWave(pending.length);
     })();
     return () => {
       stop = true;
     };
-  }, []);
+  }, [visit.seed, visit.mult]);
 
   useFrame(() => {
     const pending = queue.current;
     if (!ready.current || !pending) return;
-    if (pileBus.moreTick !== moreSeen.current && !falling.current && pending.length > 0) {
+    if (pileBus.moreTick !== moreSeen.current && pending.length > 0) {
+      const ticks = Math.max(1, pileBus.moreTick - moreSeen.current);
       moreSeen.current = pileBus.moreTick;
-      beginWave(pending.length);
+      const extra = Math.min(pending.length, batch.current * ticks, Math.max(0, limit.current - live.current - waveLeft.current));
+      waveLeft.current += extra;
+      nextDrop.current = Math.min(nextDrop.current, performance.now());
+      falling.current = true;
+      landAt.current = Number.POSITIVE_INFINITY;
+      pileBus.moreReady = false;
+      emitPile();
     }
     if (waveLeft.current > 0) {
       const now = performance.now();
       const next: Drop[] = [];
       while (waveLeft.current > 0 && pending.length > 0 && now >= nextDrop.current) {
-        const asset = pending.pop()!;
-        const size = dropSize();
-        waveLeft.current -= 1;
-        nextDrop.current += 80;
-        rememberIds([asset.id]);
-        const angle = Math.random() * Math.PI * 2;
-        const reach = Math.max(0.45, AREA - 0.7 - size * 0.45);
-        const radius = Math.sqrt(Math.random()) * reach;
-        next.push({
-          key: `${asset.id}-${live.current + next.length}`,
-          asset: { ...asset, size },
-          position: [
-            Math.cos(angle) * radius,
-            2.1 + size + Math.random() * 1.5,
-            Math.sin(angle) * radius,
-          ],
-          rotation: [Math.random() * Math.PI, Math.random() * Math.PI * 2, Math.random() * 0.6],
-        });
+        const n = Math.min(perTick.current, waveLeft.current, pending.length);
+        for (let i = 0; i < n; i++) {
+          const asset = pending.pop();
+          if (!asset) break;
+          waveLeft.current -= 1;
+          const size = scaleFor(asset.id, visit.seed);
+          rememberIds([asset.id]);
+          const angle = Math.random() * Math.PI * 2;
+          const radius = Math.sqrt(Math.random()) * Math.max(0.35, Math.min(FALL_RADIUS, AREA - size * 0.45 - 0.7));
+          next.push({
+            key: `${asset.id}-${live.current + next.length}`,
+            asset: { ...asset, size },
+            position: [Math.cos(angle) * radius, 6.5 + size + Math.random() * 8, Math.sin(angle) * radius],
+            rotation: [Math.random() * Math.PI, Math.random() * Math.PI * 2, Math.random() * 0.6],
+          });
+        }
+        nextDrop.current += 70;
       }
       if (next.length) {
         live.current += next.length;
         setDrops((prev) => [...prev, ...next]);
       }
-      if (waveLeft.current === 0) landAt.current = performance.now() + 1100;
+      if (waveLeft.current === 0) landAt.current = performance.now() + 2200;
     }
     if (!falling.current || waveLeft.current > 0 || performance.now() < landAt.current) return;
     falling.current = false;
@@ -539,9 +746,26 @@ function Spawner() {
       {drops.map((drop) => (
         <QuietBoundary key={drop.key}>
           <Suspense fallback={null}>
-            <EmojiCard asset={drop.asset} position={drop.position} rotation={drop.rotation} />
+            <EmojiCard
+              asset={drop.asset}
+              position={drop.position}
+              rotation={drop.rotation}
+              onBurst={(next) => {
+                setShards((prev) => {
+                  const merged = prev.concat(next);
+                  return merged.length > 240 ? merged.slice(merged.length - 240) : merged;
+                });
+              }}
+              onGone={() => {
+                setDrops((prev) => prev.filter((item) => item.key !== drop.key));
+                live.current = Math.max(0, live.current - 1);
+              }}
+            />
           </Suspense>
         </QuietBoundary>
+      ))}
+      {shards.map((shard) => (
+        <PixelShard key={shard.key} shard={shard} />
       ))}
     </>
   );
@@ -553,15 +777,15 @@ function WorldForces() {
   const seen = useRef(0);
   const right = useRef(new THREE.Vector3());
   const screenUp = useRef(new THREE.Vector3());
-  const gravity = useRef(new THREE.Vector3(0, -22, 0));
-  const target = useRef(new THREE.Vector3(0, -22, 0));
+  const gravity = useRef(new THREE.Vector3(0, -13, 0));
+  const target = useRef(new THREE.Vector3(0, -13, 0));
 
   useFrame((_, delta) => {
     const dt = Math.min(delta, 0.05);
     pileBus.rush *= Math.exp(-dt * 1.35);
     pileBus.heat = Math.max(0, pileBus.heat - dt * 0.035);
     const rush = pileBus.rush;
-    const G = 24 + rush * 10;
+    const G = 13 + rush * 6;
     right.current.setFromMatrixColumn(camera.matrixWorld, 0);
     right.current.y = 0;
     if (right.current.lengthSq() < 1e-6) right.current.set(1, 0, 0);
@@ -571,15 +795,15 @@ function WorldForces() {
     if (screenUp.current.lengthSq() < 1e-6) screenUp.current.set(0, 0, -1);
     else screenUp.current.normalize();
 
-    if (pileBus.orient.active) {
+    const betaDeg = pileBus.key.on ? pileBus.key.beta : pileBus.orient.beta;
+    const gammaDeg = pileBus.key.on ? pileBus.key.gamma : pileBus.orient.gamma;
+    const steered = pileBus.key.on || pileBus.orient.active;
+    if (steered) {
       const orientAngle =
-        ((window.screen.orientation?.angle ??
-          (window as Window & { orientation?: number }).orientation ??
-          0) *
-          Math.PI) /
+        ((window.screen.orientation?.angle ?? (window as Window & { orientation?: number }).orientation ?? 0) * Math.PI) /
         180;
-      const beta = (pileBus.orient.beta * Math.PI) / 180;
-      const gamma = (pileBus.orient.gamma * Math.PI) / 180;
+      const beta = (betaDeg * Math.PI) / 180;
+      const gamma = (gammaDeg * Math.PI) / 180;
       const dx = Math.sin(gamma);
       const dy = -Math.cos(gamma) * Math.sin(beta);
       const dz = -Math.cos(gamma) * Math.cos(beta);
@@ -606,12 +830,13 @@ function WorldForces() {
     pileBus.jolt.z *= decay;
     pileBus.jolt.mag *= decay;
     const jmag = pileBus.jolt.mag;
-    if (pileBus.orient.active || jmag > 2) {
+    if (steered || jmag > 2) {
       for (const body of bodies) {
         if (body !== pileBus.held) body.wakeUp();
       }
     }
 
+    const limit = AREA - 0.2;
     for (const body of bodies) {
       const mass = body.mass();
       if (!Number.isFinite(mass) || mass <= 0 || body === pileBus.held) continue;
@@ -619,16 +844,24 @@ function WorldForces() {
       const dist = Math.hypot(t.x, t.z);
       if (t.y < -0.02) {
         const v = body.linvel();
-        body.setTranslation({ x: t.x, y: 0.06, z: t.z }, true);
-        body.setLinvel({ x: v.x * 0.9, y: Math.max(2.4, -v.y * 0.8), z: v.z * 0.9 }, true);
+        body.setTranslation({ x: t.x, y: 0.08, z: t.z }, true);
+        body.setLinvel({ x: v.x * 0.4, y: 0.2, z: v.z * 0.4 }, true);
         continue;
       }
-      const edge = AREA - 0.35;
-      if (dist < edge) continue;
-      const pull = Math.min(28, Math.max(0, dist - edge) * 6 + Math.max(0, -t.y) * 12);
-      const scale = pull * mass * dt;
-      const basis = Math.max(dist, 0.2);
-      body.applyImpulse({ x: (-t.x / basis) * scale, y: t.y < 0 ? scale : 0, z: (-t.z / basis) * scale }, true);
+      if (dist <= limit) continue;
+      const nx = t.x / dist;
+      const nz = t.z / dist;
+      const v = body.linvel();
+      const outward = v.x * nx + v.z * nz;
+      body.setTranslation({ x: nx * limit, y: t.y, z: nz * limit }, true);
+      body.setLinvel(
+        {
+          x: v.x - nx * Math.max(0, outward),
+          y: Math.min(v.y, 0.4),
+          z: v.z - nz * Math.max(0, outward),
+        },
+        true,
+      );
     }
 
     if (pileBus.shakeSeq === seen.current) return;
@@ -665,96 +898,252 @@ function WorldForces() {
   return null;
 }
 
+function GroundPan() {
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+  const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
+  const down = useRef<{ x: number; y: number; id: number } | null>(null);
+  const pts = useRef(new Map<number, { x: number; y: number }>());
+  const pinch = useRef<{ dist: number; angle: number } | null>(null);
+  const grab = useRef(new THREE.Vector3());
+  const hit = useRef(new THREE.Vector3());
+  const ndc = useRef(new THREE.Vector2());
+  const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), []);
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+
+  useEffect(() => {
+    const el = gl.domElement;
+    const read = (clientX: number, clientY: number, out: THREE.Vector3) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 2 || rect.height < 2) return null;
+      ndc.current.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+      raycaster.setFromCamera(ndc.current, camera);
+      return raycaster.ray.intersectPlane(plane, out);
+    };
+    const pair = () => {
+      const marks = [...pts.current.values()];
+      if (marks.length < 2) return null;
+      const a = marks[0]!;
+      const b = marks[1]!;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      return { dist: Math.max(1, Math.hypot(dx, dy)), angle: Math.atan2(dy, dx) };
+    };
+    const start = (event: PointerEvent) => {
+      pts.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pts.current.size >= 2) {
+        down.current = null;
+        pinch.current = pair();
+        return;
+      }
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      down.current = { x: event.clientX, y: event.clientY, id: event.pointerId };
+    };
+    const move = (event: PointerEvent) => {
+      const mark = pts.current.get(event.pointerId);
+      if (!mark) return;
+      mark.x = event.clientX;
+      mark.y = event.clientY;
+      if (pileBus.dragging) {
+        down.current = null;
+        pinch.current = null;
+        return;
+      }
+      const twist = pinch.current;
+      if (pts.current.size >= 2 && twist && controls) {
+        const next = pair();
+        if (!next) return;
+        let spin = next.angle - twist.angle;
+        if (spin > Math.PI) spin -= Math.PI * 2;
+        if (spin < -Math.PI) spin += Math.PI * 2;
+        const target = controls.target;
+        const offset = camera.position.clone().sub(target);
+        offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), spin);
+        const dist = Math.min(controls.maxDistance, Math.max(controls.minDistance, offset.length() * (twist.dist / next.dist)));
+        offset.setLength(dist);
+        camera.position.copy(target).add(offset);
+        camera.lookAt(target);
+        controls.update();
+        pinch.current = next;
+        return;
+      }
+      const origin = down.current;
+      if (!origin || event.pointerId !== origin.id || !controls) return;
+      const dx = event.clientX - origin.x;
+      const rect = el.getBoundingClientRect();
+      if (Math.abs(event.clientY - origin.y) > 0.5 && read(origin.x, origin.y, grab.current) && read(origin.x, event.clientY, hit.current)) {
+        const target = controls.target;
+        let nextX = target.x + (grab.current.x - hit.current.x);
+        let nextZ = target.z + (grab.current.z - hit.current.z);
+        const reach = Math.hypot(nextX, nextZ);
+        if (reach > AREA) {
+          nextX = (nextX / reach) * AREA;
+          nextZ = (nextZ / reach) * AREA;
+        }
+        const shiftX = nextX - target.x;
+        const shiftZ = nextZ - target.z;
+        target.x = nextX;
+        target.z = nextZ;
+        camera.position.x += shiftX;
+        camera.position.z += shiftZ;
+      }
+      if (Math.abs(dx) > 0.5) {
+        const target = controls.target;
+        const offset = camera.position.clone().sub(target);
+        offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), (-2 * Math.PI * dx) / Math.max(1, rect.height));
+        camera.position.copy(target).add(offset);
+        camera.lookAt(target);
+        controls.update();
+      }
+      origin.x = event.clientX;
+      origin.y = event.clientY;
+    };
+    const end = (event: PointerEvent) => {
+      pts.current.delete(event.pointerId);
+      pinch.current = pts.current.size >= 2 ? pair() : null;
+      if (down.current?.id === event.pointerId) down.current = null;
+    };
+    el.addEventListener("pointerdown", start);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    return () => {
+      el.removeEventListener("pointerdown", start);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+  }, [camera, controls, gl, plane, raycaster]);
+
+  return null;
+}
+
 function OrbitRig() {
-  const ref = useRef<OrbitLike>(null);
+  const ref = useRef<OrbitControlsImpl>(null);
   useFrame(() => {
     if (ref.current) ref.current.enabled = !pileBus.dragging;
   });
   return (
     <OrbitControls
-      ref={ref as never}
+      ref={ref}
       makeDefault
-      enablePan
-      screenSpacePanning
-      panSpeed={1.35}
-      rotateSpeed={1.75}
-      zoomSpeed={1.2}
-      enableDamping
-      dampingFactor={0.07}
-      minDistance={2.4}
-      maxDistance={28}
-      minPolarAngle={0.08}
-      maxPolarAngle={1.42}
-      target={[0, 0.15, 0]}
-      touches={{
-        ONE: THREE.TOUCH.ROTATE,
-        TWO: THREE.TOUCH.DOLLY_PAN,
-      }}
+      enableRotate={false}
+      enablePan={false}
+      enableZoom
+      zoomToCursor={false}
+      zoomSpeed={1}
+      enableDamping={false}
+      minDistance={4}
+      maxDistance={48}
+      target={[0, 0.55, 0]}
+      mouseButtons={{ LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
+      touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.ROTATE }}
     />
   );
 }
 
-const PLANE_TILT = Math.PI / 6;
+const LOOK = new THREE.Vector3(0, 0.55, 0);
+const ELEV = Math.PI / 5.2;
+const YAW = Math.PI / 4.2;
 
 function FrameView() {
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
   const size = useThree((s) => s.size);
-  const controls = useThree((s) => s.controls) as OrbitLike | null;
+  const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
+  const posed = useRef(false);
+  const locked = useRef(false);
 
   useEffect(() => {
-    const aspect = Math.max(0.35, size.width / Math.max(1, size.height));
-    const fov = 40;
+    if (size.width < 2 || size.height < 2) return;
+    const aspect = size.width / Math.max(1, size.height);
+    const fov = 42;
     camera.fov = fov;
-    const vFov = THREE.MathUtils.degToRad(fov);
-    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
-    const span = AREA * 2 + 0.7;
-    const dist = span / 2 / Math.tan(hFov / 2);
-    const look = new THREE.Vector3(0, 0.12, 0);
-    camera.position.set(0, look.y + Math.sin(PLANE_TILT) * dist, look.z + Math.cos(PLANE_TILT) * dist);
-    camera.near = 0.08;
-    camera.far = Math.max(80, dist * 4);
-    camera.lookAt(look);
-    const fullH = size.height * 1.06;
-    camera.setViewOffset(size.width, fullH, 0, 0, size.width, size.height);
+    if (!posed.current) {
+      const vFov = THREE.MathUtils.degToRad(fov);
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+      const width = AREA * 2 * 1.08;
+      const height = AREA * 2 * Math.sin(ELEV) * 1.16;
+      const distH = width / 2 / Math.tan(hFov / 2);
+      const distV = height / 2 / Math.tan(vFov / 2);
+      const dist = Math.min(distH, distV);
+      camera.position.set(
+        LOOK.x + Math.cos(ELEV) * Math.sin(YAW) * dist,
+        LOOK.y + Math.sin(ELEV) * dist,
+        LOOK.z + Math.cos(ELEV) * Math.cos(YAW) * dist,
+      );
+      camera.near = 0.05;
+      camera.far = Math.max(80, dist * 6);
+      camera.lookAt(LOOK);
+      posed.current = true;
+    }
+    camera.aspect = aspect;
+    camera.clearViewOffset();
     camera.updateProjectionMatrix();
-    if (controls) {
-      controls.target.copy(look);
+    if (controls && !locked.current) {
+      const polar = Math.PI / 2 - ELEV;
+      controls.target.copy(LOOK);
+      controls.enableRotate = false;
+      controls.enablePan = false;
+      controls.zoomToCursor = false;
+      controls.minPolarAngle = polar;
+      controls.maxPolarAngle = polar;
+      controls.minAzimuthAngle = -Infinity;
+      controls.maxAzimuthAngle = Infinity;
+      const dist = camera.position.distanceTo(LOOK);
+      controls.minDistance = dist * 0.32;
+      controls.maxDistance = dist * 2.4;
       controls.update();
+      locked.current = true;
     }
   }, [camera, controls, size.height, size.width]);
 
   return null;
 }
 
-function Stage({ lit }: { lit: boolean }) {
+function GlGuard() {
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const lost = (event: Event) => {
+      event.preventDefault();
+    };
+    canvas.addEventListener("webglcontextlost", lost);
+    return () => canvas.removeEventListener("webglcontextlost", lost);
+  }, [gl]);
+  return null;
+}
+
+function Stage({ lit, visit }: { lit: boolean; visit: Visit }) {
   return (
-    <Physics gravity={[0, -18, 0]} timeStep={1 / 60} maxCcdSubsteps={4}>
+    <Physics gravity={[0, -13, 0]} timeStep={1 / 60} maxCcdSubsteps={4}>
       <Backdrop lit={lit} />
       <Lights lit={lit} />
       <Floor lit={lit} />
-      <Spawner />
+      <Spawner visit={visit} />
       <WorldForces />
       <OrbitRig />
+      <GroundPan />
       <FrameView />
+      <GlGuard />
     </Physics>
   );
 }
 
-export function PileCanvas({ lit }: { lit: boolean }) {
+export function PileCanvas({ lit, visit }: { lit: boolean; visit: Visit }) {
   const phone = onPhone();
   return (
     <Canvas
       className="h-full w-full touch-none"
-      shadows={!phone}
-      dpr={phone ? 1 : [1, 1.5]}
-      camera={{ position: [0, 6.2, 10.8], fov: 40, near: 0.08, far: 80 }}
+      shadows={false}
+      dpr={phone ? [1, 1.25] : [1, 1.5]}
+      camera={{ position: [6, 6, 6], fov: 42, near: 0.05, far: 80 }}
       gl={{ antialias: !phone, alpha: false, powerPreference: "high-performance" }}
       onPointerMissed={() => {
         pileBus.dragging = false;
       }}
     >
       <Suspense fallback={null}>
-        <Stage lit={lit} />
+        <Stage lit={lit} visit={visit} />
       </Suspense>
     </Canvas>
   );

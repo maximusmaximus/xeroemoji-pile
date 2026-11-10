@@ -3,6 +3,13 @@ import { TOP_EMOJI_IDS } from "@/data/top500";
 
 export const REPO_URL = "https://github.com/maximusmaximus/xeroemoji-pile";
 
+export function emojiGlyph(id: string) {
+  return id
+    .split("-")
+    .map((part) => String.fromCodePoint(Number.parseInt(part, 16)))
+    .join("");
+}
+
 export type EmojiAsset = {
   id: string;
   name: string;
@@ -11,7 +18,7 @@ export type EmojiAsset = {
 };
 
 function toAsset(id: string): EmojiAsset {
-  return { id, name: id, url: emojiUrl(id), size: 1 };
+  return { id, name: emojiGlyph(id), url: emojiUrl(id), size: 1 };
 }
 
 export function emojiUrl(id: string) {

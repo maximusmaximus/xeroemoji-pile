@@ -1,4 +1,4 @@
-const PHONE_LIVE_LIMIT = 120;
+const PHONE_LIVE_LIMIT = 160;
 
 export function onPhone() {
   if (typeof window === "undefined") return false;
@@ -9,5 +9,5 @@ export function onPhone() {
 }
 
 export function liveLimit() {
-  return onPhone() ? PHONE_LIVE_LIMIT : 240;
+  return onPhone() ? PHONE_LIVE_LIMIT : 280;
 }

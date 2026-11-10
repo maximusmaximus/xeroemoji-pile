@@ -3,10 +3,54 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { PileCanvas } from "@/components/pile/scene";
 import { emitPile, pileBus, subscribePile } from "@/components/pile/bus";
 import { REPO_URL } from "@/components/pile/library";
+import { readVisit, type Visit } from "@/data/visit";
 
 export const Route = createFileRoute("/")({ component: Home });
 
 let sensorsArmed = false;
+let keysArmed = false;
+
+const TIPS =
+  "Drag to slide around the pile   ·   Drag left or right to spin the view   ·   Pinch to zoom and rotate   ·   Drag an emoji to move it   ·   Hold an emoji until it bursts   ·   Shake the phone a few times and the pile lifts   ·   Tilt the phone and gravity follows   ·   On a computer, arrows tilt and space shakes   ·   More Emojis drops faces you have not seen   ·   ";
+
+function armKeys() {
+  if (keysArmed || typeof window === "undefined") return;
+  keysArmed = true;
+  const held = { left: false, right: false, up: false, down: false };
+  let lastSpace = 0;
+  const sync = () => {
+    const on = held.left || held.right || held.up || held.down;
+    pileBus.key.on = on;
+    pileBus.key.gamma = (held.right ? 34 : 0) + (held.left ? -34 : 0);
+    pileBus.key.beta = (held.down ? 32 : 0) + (held.up ? -28 : 0);
+  };
+  window.addEventListener("keydown", (event) => {
+    if (event.code === "ArrowLeft") held.left = true;
+    if (event.code === "ArrowRight") held.right = true;
+    if (event.code === "ArrowUp") held.up = true;
+    if (event.code === "ArrowDown") held.down = true;
+    if (event.code.startsWith("Arrow")) {
+      event.preventDefault();
+      sync();
+    }
+    if (event.code === "Space") {
+      event.preventDefault();
+      const now = performance.now();
+      if (now - lastSpace < 140) return;
+      lastSpace = now;
+      pileBus.shakePower = 2.6;
+      pileBus.jolt.y = 7;
+      pileBus.shakeSeq += 1;
+    }
+  });
+  window.addEventListener("keyup", (event) => {
+    if (event.code === "ArrowLeft") held.left = false;
+    if (event.code === "ArrowRight") held.right = false;
+    if (event.code === "ArrowUp") held.up = false;
+    if (event.code === "ArrowDown") held.down = false;
+    if (event.code.startsWith("Arrow")) sync();
+  });
+}
 
 function armSensors() {
   if (sensorsArmed || typeof window === "undefined") return;
@@ -134,11 +178,15 @@ async function enableMotion() {
 
 function Home() {
   const [mounted, setMounted] = useState(false);
+  const [visit, setVisit] = useState<Visit | null>(null);
   const lit = useSyncExternalStore(subscribePile, () => pileBus.lit, () => true);
   const more = useSyncExternalStore(subscribePile, () => pileBus.moreReady, () => false);
+  const hold = useSyncExternalStore(subscribePile, () => pileBus.hold, () => null);
 
   useEffect(() => {
     armSensors();
+    armKeys();
+    setVisit(readVisit());
     setMounted(true);
     const base = {
       w: window.innerWidth,
@@ -191,9 +239,22 @@ function Home() {
   return (
     <main className="fixed inset-0 h-[100dvh] w-[100vw] overflow-hidden bg-bg text-fg">
       <h1 className="sr-only">Xero Emoji Pile</h1>
-      <div className="absolute inset-0">{mounted ? <PileCanvas lit={lit} /> : null}</div>
+      <div className="tip-bar" aria-label="How to use Xero Emoji Pile">
+        <div className="tip-track">
+          <span>{TIPS}</span>
+          <span aria-hidden="true">{TIPS}</span>
+        </div>
+      </div>
+      <div className="absolute inset-0">{mounted && visit ? <PileCanvas lit={lit} visit={visit} /> : null}</div>
 
-      <div className="absolute inset-x-0 z-10 flex items-center justify-center gap-3 px-3 bottom-[max(1.7rem,calc(env(safe-area-inset-bottom)+1.35rem))]">
+      {hold ? (
+        <p className="hold-name" style={{ color: hold.color }}>
+          {hold.label}
+        </p>
+      ) : null}
+
+      <footer className="pile-dock" data-dock="1">
+        <div className="pile-dock-row">
         <button
           type="button"
           aria-pressed={lit}
@@ -250,19 +311,19 @@ function Home() {
         >
           <img src="/xero/2139.svg" alt="" className="size-8" />
         </a>
-      </div>
-
-      <p className="absolute inset-x-0 bottom-[max(0.35rem,env(safe-area-inset-bottom))] z-10 text-center text-xs leading-none text-fg/90">
-        made with <img src="/xero/1f9e1.svg" alt="" className="inline size-3.5 align-[-2px]" /> in SF{" "}
-        <a
-          href="https://maxi.grok.me"
-          target="_blank"
-          rel="noreferrer"
-          className="underline decoration-line underline-offset-2"
-        >
-          maxi.grok.me
-        </a>
-      </p>
+        </div>
+        <p className="pointer-events-auto text-center text-xs leading-none text-fg/90">
+          made with <img src="/xero/1f9e1.svg" alt="" className="inline size-3.5 align-[-2px]" /> in SF{" "}
+          <a
+            href="https://maxi.grok.me"
+            target="_blank"
+            rel="noreferrer"
+            className="underline decoration-line underline-offset-2"
+          >
+            maxi.grok.me
+          </a>
+        </p>
+      </footer>
     </main>
   );
 }
